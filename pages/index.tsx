@@ -3,6 +3,7 @@ import Image from "next/image";
 import styles from "../styles/Home.module.css";
 import { InferGetServerSidePropsType } from "next";
 import { Octokit } from "octokit";
+import { RestEndpointMethodTypes } from "@octokit/plugin-rest-endpoint-methods";
 import got from "got";
 import {
   allEnvironmentNames,
@@ -12,6 +13,7 @@ import {
   PossibleEnvironment,
 } from "../lib/getImportMap";
 import { ResourceUrlParsed, urlToParsed } from "../lib/urlToCommit";
+import { Row, Col, Divider, Card, Alert, Space } from "antd";
 
 // const getAllReposWeCareAbout = (
 //   importMaps: Array<{
@@ -36,6 +38,7 @@ import { ResourceUrlParsed, urlToParsed } from "../lib/urlToCommit";
 
 interface CommitDetails extends ResourceUrlParsed {
   commitedDateStr: string | null;
+  commitInfo: RestEndpointMethodTypes["repos"]["getCommit"]["response"] | null;
 }
 
 type CommitByEnvByRepoName = Record<
@@ -88,14 +91,16 @@ const groupByRepoNameByEnvironment = (
 };
 
 const setCommitDateToNull = (
-  urlInfo: ResourceUrlParsed | null
+  urlInfo: ResourceUrlParsed | null,
+  newValue: null
 ): CommitDetails | null => {
   if (urlInfo === null) {
     return null;
   }
 
   return {
-    commitedDateStr: null,
+    commitedDateStr: newValue,
+    commitInfo: null,
     ...urlInfo,
   };
 };
@@ -108,10 +113,35 @@ const urlInfoToDetailsInitializer = (
   initialialValue: null
 ): Record<PossibleEnvironment, CommitDetails | null> => {
   return {
-    development: setCommitDateToNull(input["development"]),
-    qa: setCommitDateToNull(input["qa"]),
-    staging: setCommitDateToNull(input["staging"]),
-    production: setCommitDateToNull(input["production"]),
+    development: setCommitDateToNull(input["development"], initialialValue),
+    qa: setCommitDateToNull(input["qa"], initialialValue),
+    staging: setCommitDateToNull(input["staging"], initialialValue),
+    production: setCommitDateToNull(input["production"], initialialValue),
+  };
+};
+
+interface AwaitableCommitInfo {
+  importName: string;
+  environment: PossibleEnvironment;
+  getCommitPromise: Promise<
+    RestEndpointMethodTypes["repos"]["getCommit"]["response"]
+  >;
+}
+
+const asyncGetCommitsWithContext = async (
+  input: AwaitableCommitInfo
+): Promise<{
+  importName: string;
+  environment: PossibleEnvironment;
+  commitInfo: RestEndpointMethodTypes["repos"]["getCommit"]["response"];
+}> => {
+  const { environment, importName } = input;
+  const commitInfo = await input.getCommitPromise;
+
+  return {
+    commitInfo,
+    environment,
+    importName,
   };
 };
 
@@ -120,39 +150,45 @@ const decorateWithCommitInfo = async (
   octokitInstance: Octokit
 ): Promise<DetailedCommitByEnvByRepoName> => {
   const result: DetailedCommitByEnvByRepoName = {};
+  const promisesByHash: AwaitableCommitInfo[] = [];
   for (const [importName, commitByEnv] of Object.entries(lookup)) {
     result[importName] = urlInfoToDetailsInitializer(commitByEnv, null);
     for (const [environmentUnsafe, commitInfo] of Object.entries(commitByEnv)) {
       const environment = environmentUnsafe as PossibleEnvironment;
       if (commitInfo) {
-        const fullCommitInfoFromAPI = commitInfo.commitSha
-          ? await octokitInstance.rest.repos.getCommit({
-              owner: process.env.WIMFME_GITHUB_ORG as string,
-              repo: importName,
-              ref: commitInfo.commitSha,
-            })
-          : undefined;
-        console.log(fullCommitInfoFromAPI);
-        const maybeTheDate = fullCommitInfoFromAPI?.data.commit.committer?.date;
-        const commitedDateStr = !maybeTheDate ? null : maybeTheDate;
-        console.log(`commitedDateStr: ${commitedDateStr}`);
-        const commitDetails: CommitDetails = {
-          commitSha: commitInfo.commitSha,
-          fullUrl: commitInfo.fullUrl,
-          commitedDateStr,
-        };
+        const getCommitPromise = octokitInstance.rest.repos.getCommit({
+          owner: process.env.WIMFME_GITHUB_ORG as string,
+          repo: importName,
+          ref: commitInfo.commitSha,
+        });
 
-        result[importName][environment] = commitDetails;
-      } else {
-        result[importName] = {
-          development: null,
-          qa: null,
-          staging: null,
-          production: null,
-        };
+        promisesByHash.push({
+          environment,
+          importName,
+          getCommitPromise,
+        });
       }
     }
   }
+
+  const fullDataPerCommit = await Promise.all(
+    promisesByHash.map(asyncGetCommitsWithContext)
+  );
+
+  fullDataPerCommit.forEach(({ importName, environment, commitInfo }) => {
+    const maybeTheDate = commitInfo.data.commit.committer?.date;
+    const commitedDateStr = !maybeTheDate ? null : maybeTheDate;
+    console.log(`commitedDateStr: ${commitedDateStr}`);
+    const commitDetails: CommitDetails = {
+      fullUrl: result[importName][environment]!.fullUrl,
+      commitSha: commitInfo.data.sha,
+      commitedDateStr,
+      commitInfo,
+    };
+
+    result[importName][environment] = commitDetails;
+  });
+
   return result;
 };
 
@@ -162,26 +198,10 @@ export const getServerSideProps = async () => {
     log: console,
   });
 
-  // get repos
-  // check each import map for the commit from each of those repos
+  // check each import map for the commit from each repo
   // display each commit for each repo for each environment
   // Check how old that commit is
   // Check if a commit is waiting to be promoted (i.e. it's newer than the higher environment's commit)
-
-  const listForOrgParams = {
-    org: process.env.WIMFME_GITHUB_ORG as string,
-    type: "internal",
-  } as const;
-
-  console.log(
-    `About to call octokitInstance.rest.repos.listForOrg with ${JSON.stringify(
-      listForOrgParams
-    )}`
-  );
-
-  const { data: repos } = await octokitInstance.rest.repos.listForOrg(
-    listForOrgParams
-  );
 
   const importMaps = await Promise.all(
     allEnvironmentNames.map((environment) => {
@@ -198,65 +218,84 @@ export const getServerSideProps = async () => {
 
   return {
     props: {
-      repos,
       urlsByEnvironmentByRepo,
     },
   };
 };
 
+const AboutSection = () => {
+  return (
+    <Space direction="vertical" style={{ maxWidth: "600px" }}>
+      <div>
+        This page is designed to help you track down the state of each
+        MicroFrontend in each environment.
+      </div>
+
+      <Alert
+        message={`NOTE: if you do not see the expected repositories, please remember to set the repo visibility to "internal" or "public" (if legal agrees), but make sure it is not set to "private"`}
+        type="warning"
+        showIcon={true}
+      />
+    </Space>
+  );
+};
+
 function Page({
-  repos,
   urlsByEnvironmentByRepo,
 }: InferGetServerSidePropsType<typeof getServerSideProps>) {
-  const repoNames = repos
-    .map((r) => {
-      return r.name + " ";
-    })
-    .filter((r) => {
-      return r.includes(process.env.WIMFME_GITHUB_FILTER_PREFIX as string);
-    });
+  const importNameToEnvironmentTuples = Object.entries(urlsByEnvironmentByRepo);
+  const noItemsFoundMessage = `The token you provided might not have the necessary scopes and/or have read access since we were unable to get any information for any repository`;
 
   return (
     <div className={styles.container}>
       <Head>
-        <title>Create Next App</title>
-        <meta name="description" content="Generated by create next app" />
+        <title>Where Is My MicroFrontend</title>
+        <meta
+          name="description"
+          content="An app that helps you determine what needs to be promoted"
+        />
         <link rel="icon" href="/favicon.ico" />
       </Head>
 
       <main className={styles.main}>
-        {repoNames.length ? repoNames : "NONE FOUND"}
+        <h1>Where Is My MicroFrontend</h1>
+        <AboutSection />
+        {importNameToEnvironmentTuples.length === 0
+          ? noItemsFoundMessage
+          : importNameToEnvironmentTuples.map(([importName, urlsByEnv]) => {
+              return (
+                <div key={importName}>
+                  <Divider orientation="left"></Divider>
+                  <h2>{importName}</h2>
+                  <Row gutter={{ xs: 8, sm: 16, md: 24, lg: 32 }}>
+                    {Object.entries(urlsByEnv).map(
+                      ([environmentName, info]) => {
+                        const style = {
+                          background: "#0092ff",
+                          padding: "8px 0",
+                        };
 
-        {/* {importMapsPerEnvironment.map((anEnvironment) => (
-          <div>
-            <h2>{anEnvironment.environment}</h2>
-            <div>{JSON.stringify(anEnvironment.importMapInEnvironment)}</div>
-          </div>
-        ))} */}
-
-        {Object.entries(urlsByEnvironmentByRepo).map(
-          ([importName, urlsByEnv]) => {
-            return (
-              <div key={importName}>
-                <h2>{importName}</h2>
-                <div>
-                  {Object.entries(urlsByEnv).map(([environmentName, info]) => {
-                    return (
-                      <div key={environmentName}>
-                        <div>environmentName: {environmentName}</div>
-                        <div>url: {info?.fullUrl}</div>
-                        <div>commit: {info?.commitSha}</div>
-                        <div>
-                          commitedDateStr: {info?.commitedDateStr?.toString()}
-                        </div>
-                      </div>
-                    );
-                  })}
+                        return (
+                          <Col
+                            className="gutter-row"
+                            key={environmentName}
+                            span={6}
+                          >
+                            <Card title={environmentName} bordered={true}>
+                              <div>commit: {info?.commitSha}</div>
+                              <div>
+                                commitedDateStr:{" "}
+                                {info?.commitedDateStr?.toString()}
+                              </div>
+                            </Card>
+                          </Col>
+                        );
+                      }
+                    )}
+                  </Row>
                 </div>
-              </div>
-            );
-          }
-        )}
+              );
+            })}
       </main>
     </div>
   );
