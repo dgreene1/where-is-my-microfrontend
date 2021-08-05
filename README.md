@@ -12,13 +12,14 @@ A tool to help you to keep your microfrontend deployments up-to-date
 
 # Usage
 
+_TBD_
+
 # Security
 
-This will never share your password/token and it has protections put in place to ensure that your credentials are anonymized before (if) ever being written to the console.
+This will never share your Github [personal access token](https://docs.github.com/en/github/authenticating-to-github/keeping-your-account-and-data-secure/creating-a-personal-access-token) and it has protections put in place to ensure that your credentials are anonymized before (if) ever being written to the console.
 
-In order to set your username and password, have the following environment variables set:
+In order to set your token, create a file next to where you're running this app that is called `"env.local"` with the following inside:
 
-| Environment Key Name | Type   | Meaning                                                                                                                                                                                                                         |
-| -------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| WIMMFE_USERNAME      | string | the username who has access to the repos you want to check                                                                                                                                                                      |
-| WIMMFE_PASSWORD      | string | this is where you provide the [token](https://docs.github.com/en/github/authenticating-to-github/keeping-your-account-and-data-secure/creating-a-personal-access-token) (if it's a private repo) or the password if it's public |
+```
+WIMFME_GITHUB_PAT=whateverTheValueIsOfYourToken
+```
